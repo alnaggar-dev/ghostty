@@ -4242,20 +4242,24 @@ fn maybePromptClick(self: *Surface) !bool {
         // Guarded at the start of this function
         .none => unreachable,
 
-        .click_events => {
+        .click_events => |v| {
             // For the event, we always send a left-click press event.
             // This matches what Kitty sends.
+            const key: u8, const y: u32 = switch (v) {
+                .absolute => .{ 1, pos_vp.y +| 1 },
+                .relative => .{ 2, pos_vp.y -| prompt_pin.y +| 1 },
+            };
             var data: termio.Message.WriteReq.Small.Array = undefined;
             const resp = try std.fmt.bufPrint(
                 &data,
                 "\x1B[<0;{d};{d}M",
-                .{ pos_vp.x + 1, pos_vp.y + 1 },
+                .{ pos_vp.x + 1, y },
             );
 
             // Not that noisy since this only happens on prompt clicks.
             log.debug(
-                "sending click_events=1 event=ESC{s}",
-                .{resp[1..]},
+                "sending click_events={} event=ESC{s}",
+                .{ key, resp[1..] },
             );
 
             // Ask our IO thread to write the data
@@ -4458,7 +4462,7 @@ fn openUrl(
 /// if there is no hyperlink.
 fn osc8URI(self: *Surface, pin: terminal.Pin) ?[]const u8 {
     _ = self;
-    const page = &pin.node.data;
+    const page = pin.node.page();
     const cell = pin.rowAndCell().cell;
     const link_id = page.lookupHyperlink(cell) orelse return null;
     const entry = page.hyperlink_set.get(page.memory, link_id);
