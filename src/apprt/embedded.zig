@@ -1921,7 +1921,7 @@ pub const CAPI = struct {
         core_surface.renderer_state.mutex.lock();
         defer core_surface.renderer_state.mutex.unlock();
 
-        out.* = termio.snapshot.read(
+        termio.snapshot.read(
             global.alloc,
             core_surface.renderer_state.terminal,
             .{
@@ -1929,9 +1929,9 @@ pub const CAPI = struct {
                 .parsed_offset = core_surface.io.stream_tap.offset,
                 .parser_ground = core_surface.io.terminal_stream.isGround(),
             },
+            out,
         ) catch |err| {
             log.err("error reading surface snapshot err={}", .{err});
-            out.* = .{};
             return false;
         };
         return true;

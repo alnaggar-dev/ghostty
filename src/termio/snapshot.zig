@@ -200,10 +200,33 @@ pub const Options = struct {
     parser_ground: bool,
 };
 
-/// Build a snapshot of the terminal. The caller must hold the terminal
-/// lock for the duration of the call. The returned snapshot owns its
-/// memory and must be released with `free` using the same allocator.
-pub fn read(gpa: Allocator, t: *const Terminal, opts: Options) Allocator.Error!Snapshot {
+/// Build a snapshot of the terminal into `out`. The caller must hold the
+/// terminal lock for the duration of the call. On success `out` owns its
+/// memory and must be released with `free` using the same allocator. On
+/// failure every byte of `out` is zero and nothing is left allocated.
+pub fn read(
+    gpa: Allocator,
+    t: *const Terminal,
+    opts: Options,
+    out: *Snapshot,
+) Allocator.Error!void {
+    errdefer out.* = zeroed;
+    out.* = try build(gpa, t, opts);
+}
+
+/// Release a snapshot filled by `read`, leaving it zeroed. Safe to call
+/// twice.
+pub fn free(gpa: Allocator, s: *Snapshot) void {
+    const ptr = s._internal orelse return;
+    const arena: *ArenaAllocator = @ptrCast(@alignCast(ptr));
+    arena.deinit();
+    gpa.destroy(arena);
+    s.* = zeroed;
+}
+
+const zeroed = std.mem.zeroes(Snapshot);
+
+fn build(gpa: Allocator, t: *const Terminal, opts: Options) Allocator.Error!Snapshot {
     const arena = try gpa.create(ArenaAllocator);
     arena.* = .init(gpa);
     errdefer {
@@ -248,15 +271,6 @@ pub fn read(gpa: Allocator, t: *const Terminal, opts: Options) Allocator.Error!S
     }
 
     return out;
-}
-
-/// Release a snapshot returned by `read`. Safe to call twice.
-pub fn free(gpa: Allocator, s: *Snapshot) void {
-    const ptr = s._internal orelse return;
-    const arena: *ArenaAllocator = @ptrCast(@alignCast(ptr));
-    arena.deinit();
-    gpa.destroy(arena);
-    s.* = .{};
 }
 
 const Builder = struct {
@@ -527,11 +541,13 @@ const TestTerm = struct {
     }
 
     fn snapshot(self: *TestTerm, max_scrollback_rows: u32) !Snapshot {
-        return read(testing.allocator, &self.t, .{
+        var out: Snapshot = undefined;
+        try read(testing.allocator, &self.t, .{
             .max_scrollback_rows = max_scrollback_rows,
             .parsed_offset = 0,
             .parser_ground = self.stream.isGround(),
-        });
+        }, &out);
+        return out;
     }
 };
 
@@ -757,14 +773,44 @@ test "snapshot captures modes, scroll region, palette and title" {
     try testing.expectEqual(@as(u8, 0), s.title.?[s.title_len]);
 }
 
-test "snapshot free releases memory once and resets the snapshot" {
+test "snapshot free releases memory once and zeroes the snapshot" {
     const tt = try TestTerm.init(4, 2);
     defer tt.deinit();
     tt.feed("ab");
 
     var s = try tt.snapshot(0);
     free(testing.allocator, &s);
-    try testing.expect(s._internal == null);
-    try testing.expect(s.primary.grid.cells == null);
+    try testing.expectEqual(zeroed, s);
     free(testing.allocator, &s);
+    try testing.expectEqual(zeroed, s);
+}
+
+test "snapshot read failure at any allocation zeroes the output and leaks nothing" {
+    const tt = try TestTerm.init(6, 3);
+    defer tt.deinit();
+    tt.feed("l0\r\nl1\r\nl2\r\n\x1b]2;t\x07e\u{301}\x1b[?1049hx");
+
+    const opts: Options = .{
+        .max_scrollback_rows = 10,
+        .parsed_offset = 7,
+        .parser_ground = true,
+    };
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing: testing.FailingAllocator = .init(testing.allocator, .{
+            .fail_index = fail_index,
+        });
+        const gpa = failing.allocator();
+        var out: Snapshot = .{};
+        read(gpa, &tt.t, opts, &out) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expectEqual(zeroed, out);
+            continue;
+        };
+        defer free(gpa, &out);
+        try testing.expect(fail_index > 0);
+        try testing.expectEqual(@as(u64, 7), out.parsed_offset);
+        try testing.expect(out.modes.wraparound);
+        break;
+    }
 }
