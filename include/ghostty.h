@@ -632,6 +632,10 @@ typedef struct {
   // Cumulative PTY bytes fully parsed when the snapshot was taken, in the
   // same offset space as ghostty_surface_output_cb.
   uint64_t parsed_offset;
+  // Grid resizes applied when the snapshot was taken, in the same sequence
+  // space as ghostty_surface_resize_cb: a resize with seq <= resize_seq is
+  // already in the snapshot, one with seq > resize_seq happened after it.
+  uint64_t resize_seq;
   // True if the parser holds no partial escape sequence or UTF-8 sequence.
   bool parser_ground;
   bool alt_screen_active;
@@ -660,6 +664,7 @@ typedef void (*ghostty_surface_output_cb)(void* userdata,
                                           uintptr_t len);
 typedef void (*ghostty_surface_resize_cb)(void* userdata,
                                           uint64_t offset,
+                                          uint64_t seq,
                                           uint32_t cols,
                                           uint32_t rows);
 

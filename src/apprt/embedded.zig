@@ -1927,6 +1927,7 @@ pub const CAPI = struct {
             .{
                 .max_scrollback_rows = max_scrollback_rows,
                 .parsed_offset = core_surface.io.stream_tap.offset,
+                .resize_seq = core_surface.io.stream_tap.resize_seq,
                 .parser_ground = core_surface.io.terminal_stream.isGround(),
             },
             out,
@@ -2042,7 +2043,8 @@ pub const CAPI = struct {
     /// The output callback receives every chunk of PTY bytes with the
     /// cumulative offset of its first byte, immediately before the chunk
     /// is parsed. The resize callback reports the offset at which a grid
-    /// resize took effect. Both run on termio threads while the terminal
+    /// resize took effect and the resize's sequence number, which the
+    /// snapshot's `resize_seq` orders against. Both run on termio threads while the terminal
     /// lock is held, so they are totally ordered with each other and with
     /// `ghostty_surface_read_snapshot`. Once this returns, the previous
     /// callbacks are not running and will not be called again. Callbacks

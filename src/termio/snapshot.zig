@@ -176,6 +176,7 @@ pub const Colors = extern struct {
 // ghostty_surface_snapshot_s
 pub const Snapshot = extern struct {
     parsed_offset: u64 = 0,
+    resize_seq: u64 = 0,
     parser_ground: bool = false,
     alt_screen_active: bool = false,
     alt_screen_mode: u16 = 0,
@@ -197,6 +198,7 @@ pub const Snapshot = extern struct {
 pub const Options = struct {
     max_scrollback_rows: u32,
     parsed_offset: u64,
+    resize_seq: u64,
     parser_ground: bool,
 };
 
@@ -237,6 +239,7 @@ fn build(gpa: Allocator, t: *const Terminal, opts: Options) Allocator.Error!Snap
     var b: Builder = .{ .alloc = arena.allocator() };
     var out: Snapshot = .{
         .parsed_offset = opts.parsed_offset,
+        .resize_seq = opts.resize_seq,
         .parser_ground = opts.parser_ground,
         .alt_screen_active = t.screens.active_key == .alternate,
         .alt_screen_mode = altScreenMode(t),
@@ -545,6 +548,7 @@ const TestTerm = struct {
         try read(testing.allocator, &self.t, .{
             .max_scrollback_rows = max_scrollback_rows,
             .parsed_offset = 0,
+            .resize_seq = 0,
             .parser_ground = self.stream.isGround(),
         }, &out);
         return out;
@@ -793,6 +797,7 @@ test "snapshot read failure at any allocation zeroes the output and leaks nothin
     const opts: Options = .{
         .max_scrollback_rows = 10,
         .parsed_offset = 7,
+        .resize_seq = 3,
         .parser_ground = true,
     };
     var fail_index: usize = 0;
@@ -810,6 +815,7 @@ test "snapshot read failure at any allocation zeroes the output and leaks nothin
         defer free(gpa, &out);
         try testing.expect(fail_index > 0);
         try testing.expectEqual(@as(u64, 7), out.parsed_offset);
+        try testing.expectEqual(@as(u64, 3), out.resize_seq);
         try testing.expect(out.modes.wraparound);
         break;
     }

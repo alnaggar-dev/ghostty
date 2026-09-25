@@ -18,7 +18,8 @@ state".
 typedef void (*ghostty_surface_output_cb)(void* userdata, uint64_t offset,
                                           const uint8_t* bytes, uintptr_t len);
 typedef void (*ghostty_surface_resize_cb)(void* userdata, uint64_t offset,
-                                          uint32_t cols, uint32_t rows);
+                                          uint64_t seq, uint32_t cols,
+                                          uint32_t rows);
 typedef struct {
   void* userdata;
   ghostty_surface_output_cb output;
@@ -36,6 +37,9 @@ void ghostty_surface_set_stream_callbacks(ghostty_surface_t,
   resized. `offset` is the position in the byte stream where the new size took
   effect: bytes below it were parsed at the old size, bytes at or above it at
   the new size. It is not called when a resize leaves the grid size unchanged.
+  `seq` is the resize's sequence number: the surface counts every grid resize
+  from 1, whether or not callbacks are installed. Resizes do not advance the
+  byte offset, so several can share one `offset`; `seq` orders them.
 - Both callbacks run on termio threads (the PTY read thread for output, the
   termio thread for resize) while the terminal lock is held. They are totally
   ordered with each other and with `ghostty_surface_read_snapshot`.
@@ -58,6 +62,9 @@ the result does not depend on where the local user has scrolled. The snapshot
 is taken atomically under the terminal lock and contains:
 
 - `parsed_offset`: offset of the first byte not yet parsed (the checkpoint).
+- `resize_seq`: number of grid resizes applied so far. A resize callback with
+  `seq <= resize_seq` is already reflected in the snapshot; one with
+  `seq > resize_seq` happened after it.
 - `parser_ground`: true if the parser holds no partial escape sequence or
   partial UTF-8 sequence at the checkpoint. When false, the state of the
   in-flight sequence is not part of the snapshot; a fresh parser that starts
@@ -94,13 +101,15 @@ zeroed snapshot.
 ## Gapless handoff
 
 1. Install stream callbacks and start buffering output chunks.
-2. Read a snapshot. Its `parsed_offset` is `C`.
+2. Read a snapshot. Its `parsed_offset` is `C` and its `resize_seq` is `R`.
 3. Send the snapshot, then every buffered or future byte at offset `>= C`,
    dropping bytes below `C`. Because output is reported and parsed under the
    same lock as the snapshot, every byte at or above `C` is delivered to the
    callback after it was installed, so there is no gap and no overlap.
-4. Forward resize events in stream order; apply the new size before parsing
-   bytes at or above the event offset.
+4. Forward resize events with `seq > R` in stream order and drop the rest;
+   apply the new size before parsing bytes at or above the event offset. Do
+   not filter resizes by offset: a resize applied just before the snapshot and
+   one applied just after it can both report `offset == C`.
 
 ## `ghostty_surface_read_cells` (viewport)
 
