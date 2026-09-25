@@ -21,6 +21,7 @@ const CoreSurface = @import("../Surface.zig");
 const configpkg = @import("../config.zig");
 const Config = configpkg.Config;
 const String = @import("../main_c.zig").String;
+const termio = @import("../termio.zig");
 
 const log = std.log.scoped(.embedded_window);
 
@@ -1724,7 +1725,10 @@ pub const CAPI = struct {
     };
 
     /// Read the current viewport as a grid of cells with resolved colors
-    /// and attribute flags. Allocates `out.cells`; caller must free with
+    /// and attribute flags. This is the scrolled viewport the user sees,
+    /// which shows scrollback instead of the live screen while the user
+    /// is scrolled up; use `ghostty_surface_read_snapshot` for the live
+    /// screen. Allocates `out.cells`; caller must free with
     /// `ghostty_surface_free_cells`.
     export fn ghostty_surface_read_cells(
         surface: *Surface,
@@ -1903,6 +1907,43 @@ pub const CAPI = struct {
         }
     }
 
+    /// Read a rich snapshot of the live terminal state (never the scrolled
+    /// viewport) together with the parse checkpoint, atomically under the
+    /// terminal lock. At most `max_scrollback_rows` rows of history above
+    /// the primary screen's active area are included. Caller must free
+    /// with `ghostty_surface_free_snapshot`.
+    export fn ghostty_surface_read_snapshot(
+        surface: *Surface,
+        max_scrollback_rows: u32,
+        out: *termio.snapshot.Snapshot,
+    ) bool {
+        const core_surface = &surface.core_surface;
+        core_surface.renderer_state.mutex.lock();
+        defer core_surface.renderer_state.mutex.unlock();
+
+        out.* = termio.snapshot.read(
+            global.alloc,
+            core_surface.renderer_state.terminal,
+            .{
+                .max_scrollback_rows = max_scrollback_rows,
+                .parsed_offset = core_surface.io.stream_tap.offset,
+                .parser_ground = core_surface.io.terminal_stream.isGround(),
+            },
+        ) catch |err| {
+            log.err("error reading surface snapshot err={}", .{err});
+            out.* = .{};
+            return false;
+        };
+        return true;
+    }
+
+    export fn ghostty_surface_free_snapshot(
+        _: *Surface,
+        snapshot: *termio.snapshot.Snapshot,
+    ) void {
+        termio.snapshot.free(global.alloc, snapshot);
+    }
+
     inline fn rgbPack(c: terminal.color.RGB) u32 {
         return (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | @as(u32, c.b);
     }
@@ -1995,6 +2036,25 @@ pub const CAPI = struct {
     ) void {
         surface.core_surface.pty_data_cb = cb;
         surface.core_surface.pty_data_cb_userdata = userdata;
+    }
+
+    /// Install (or clear with `null`) the offset-aware stream callbacks.
+    /// The output callback receives every chunk of PTY bytes with the
+    /// cumulative offset of its first byte, immediately before the chunk
+    /// is parsed. The resize callback reports the offset at which a grid
+    /// resize took effect. Both run on termio threads while the terminal
+    /// lock is held, so they are totally ordered with each other and with
+    /// `ghostty_surface_read_snapshot`. Once this returns, the previous
+    /// callbacks are not running and will not be called again. Callbacks
+    /// must not call back into libghostty.
+    export fn ghostty_surface_set_stream_callbacks(
+        surface: *Surface,
+        callbacks: ?*const termio.StreamTap.Callbacks,
+    ) void {
+        const core_surface = &surface.core_surface;
+        core_surface.renderer_state.mutex.lock();
+        defer core_surface.renderer_state.mutex.unlock();
+        core_surface.io.stream_tap.callbacks = if (callbacks) |c| c.* else .{};
     }
 
     /// Filter the mods if necessary. This handles settings such as

@@ -455,6 +455,220 @@ typedef struct {
   uint16_t mouse_format;
 } ghostty_cells_s;
 
+// Rich snapshot of the live terminal state. See
+// ghostty_surface_read_snapshot and docs/embedding-stream.md.
+typedef enum {
+  GHOSTTY_SNAPSHOT_COLOR_DEFAULT = 0,
+  GHOSTTY_SNAPSHOT_COLOR_PALETTE = 1,
+  GHOSTTY_SNAPSHOT_COLOR_RGB = 2,
+} ghostty_snapshot_color_tag_e;
+
+typedef enum {
+  GHOSTTY_SNAPSHOT_STYLE_BOLD = 1 << 0,
+  GHOSTTY_SNAPSHOT_STYLE_ITALIC = 1 << 1,
+  GHOSTTY_SNAPSHOT_STYLE_FAINT = 1 << 2,
+  GHOSTTY_SNAPSHOT_STYLE_BLINK = 1 << 3,
+  GHOSTTY_SNAPSHOT_STYLE_INVERSE = 1 << 4,
+  GHOSTTY_SNAPSHOT_STYLE_INVISIBLE = 1 << 5,
+  GHOSTTY_SNAPSHOT_STYLE_STRIKETHROUGH = 1 << 6,
+  GHOSTTY_SNAPSHOT_STYLE_OVERLINE = 1 << 7,
+} ghostty_snapshot_style_flags_e;
+
+// SGR 4:n underline styles.
+typedef enum {
+  GHOSTTY_SNAPSHOT_UNDERLINE_NONE = 0,
+  GHOSTTY_SNAPSHOT_UNDERLINE_SINGLE = 1,
+  GHOSTTY_SNAPSHOT_UNDERLINE_DOUBLE = 2,
+  GHOSTTY_SNAPSHOT_UNDERLINE_CURLY = 3,
+  GHOSTTY_SNAPSHOT_UNDERLINE_DOTTED = 4,
+  GHOSTTY_SNAPSHOT_UNDERLINE_DASHED = 5,
+} ghostty_snapshot_underline_e;
+
+typedef enum {
+  GHOSTTY_SNAPSHOT_WIDE_NARROW = 0,
+  GHOSTTY_SNAPSHOT_WIDE_WIDE = 1,
+  // Right half of a wide character; carries no text.
+  GHOSTTY_SNAPSHOT_WIDE_SPACER_TAIL = 2,
+  // Last column padding when a wide character wrapped to the next row.
+  GHOSTTY_SNAPSHOT_WIDE_SPACER_HEAD = 3,
+} ghostty_snapshot_wide_e;
+
+typedef enum {
+  GHOSTTY_SNAPSHOT_CURSOR_BAR = 0,
+  GHOSTTY_SNAPSHOT_CURSOR_BLOCK = 1,
+  GHOSTTY_SNAPSHOT_CURSOR_UNDERLINE = 2,
+  GHOSTTY_SNAPSHOT_CURSOR_BLOCK_HOLLOW = 3,
+} ghostty_snapshot_cursor_style_e;
+
+typedef enum {
+  GHOSTTY_SNAPSHOT_CHARSET_UTF8 = 0,
+  GHOSTTY_SNAPSHOT_CHARSET_ASCII = 1,
+  GHOSTTY_SNAPSHOT_CHARSET_BRITISH = 2,
+  GHOSTTY_SNAPSHOT_CHARSET_DEC_SPECIAL = 3,
+} ghostty_snapshot_charset_e;
+
+typedef struct {
+  uint8_t tag;  // ghostty_snapshot_color_tag_e
+  uint8_t index;  // palette index when tag is PALETTE
+  uint16_t _reserved;
+  uint32_t rgb;  // 0xRRGGBB when tag is RGB
+} ghostty_snapshot_color_s;
+
+// An SGR pen: the style of a cell or of the cursor.
+typedef struct {
+  ghostty_snapshot_color_s fg;
+  ghostty_snapshot_color_s bg;
+  ghostty_snapshot_color_s underline_color;
+  uint16_t flags;  // ghostty_snapshot_style_flags_e
+  uint8_t underline;  // ghostty_snapshot_underline_e
+  uint8_t _reserved;
+} ghostty_snapshot_style_s;
+
+typedef struct {
+  // Full grapheme cluster as UTF-8 at snapshot.text + text_offset.
+  // text_len is 0 for empty cells and spacer cells.
+  uint32_t text_offset;
+  uint32_t text_len;
+  ghostty_snapshot_style_s style;
+  uint8_t wide;  // ghostty_snapshot_wide_e
+  uint8_t _reserved[3];
+} ghostty_snapshot_cell_s;
+
+typedef struct {
+  bool wrap;  // soft-wrapped: the line continues on the next row
+  bool wrap_continuation;  // this row continues the previous row
+} ghostty_snapshot_row_s;
+
+// Row-major grid: cells has rows * cols entries, row_info has rows
+// entries. Both are NULL when rows is 0.
+typedef struct {
+  const ghostty_snapshot_cell_s* cells;
+  const ghostty_snapshot_row_s* row_info;
+  uint32_t cols;
+  uint32_t rows;
+} ghostty_snapshot_grid_s;
+
+typedef struct {
+  uint8_t g[4];  // ghostty_snapshot_charset_e designated to G0..G3
+  uint8_t gl;  // slot (0..3) invoked into GL
+  uint8_t gr;  // slot (0..3) invoked into GR
+  int8_t single_shift;  // pending SS2/SS3 slot, or -1
+  uint8_t _reserved;
+} ghostty_snapshot_charsets_s;
+
+typedef struct {
+  uint32_t x;  // 0-based column within the active area
+  uint32_t y;  // 0-based row within the active area
+  ghostty_snapshot_style_s pen;  // current SGR state
+  bool pending_wrap;  // next printable character wraps first
+  bool is_protected;  // DECSCA protection enabled
+  uint8_t style;  // ghostty_snapshot_cursor_style_e (DECSCUSR shape)
+  uint8_t _reserved;
+} ghostty_snapshot_cursor_s;
+
+// State saved by DECSC (ESC 7) or by entering mode 1049.
+typedef struct {
+  bool present;
+  bool pending_wrap;
+  bool origin;  // DECOM at save time
+  bool is_protected;
+  uint32_t x;
+  uint32_t y;
+  ghostty_snapshot_style_s pen;
+  ghostty_snapshot_charsets_s charsets;
+} ghostty_snapshot_saved_cursor_s;
+
+typedef struct {
+  bool present;  // false if this screen was never created
+  uint8_t kitty_keyboard_flags;  // current kitty keyboard flags (CSI = u)
+  uint16_t _reserved;
+  ghostty_snapshot_grid_s grid;  // active area only, never the viewport
+  ghostty_snapshot_cursor_s cursor;
+  ghostty_snapshot_saved_cursor_s saved_cursor;
+  ghostty_snapshot_charsets_s charsets;
+} ghostty_snapshot_screen_s;
+
+typedef struct {
+  bool wraparound;  // DECAWM ?7
+  bool origin;  // DECOM ?6
+  bool insert;  // IRM 4
+  bool cursor_keys;  // DECCKM ?1
+  bool keypad;  // DECKPAM / DECNKM ?66
+  bool bracketed_paste;  // ?2004
+  bool focus_event;  // ?1004
+  bool cursor_visible;  // DECTCEM ?25
+  bool cursor_blinking;  // ?12
+  bool reverse_colors;  // DECSCNM ?5
+  bool linefeed;  // LNM 20
+  bool left_right_margin;  // DECLRMM ?69
+  uint16_t mouse_event;  // 0 (off), 9, 1000, 1002 or 1003
+  uint16_t mouse_format;  // 0 (X10), 1005, 1006, 1015 or 1016
+} ghostty_snapshot_modes_s;
+
+// 0-based inclusive margins (DECSTBM / DECSLRM).
+typedef struct {
+  uint32_t top;
+  uint32_t bottom;
+  uint32_t left;
+  uint32_t right;
+} ghostty_snapshot_scroll_region_s;
+
+typedef struct {
+  bool set;  // false if neither config nor OSC provided a value
+  bool overridden;  // set by OSC 10/11/12 rather than config
+  uint16_t _reserved;
+  uint32_t rgb;  // 0xRRGGBB effective value
+} ghostty_snapshot_dynamic_color_s;
+
+typedef struct {
+  uint32_t palette[256];  // 0xRRGGBB effective 256-colour palette
+  uint8_t palette_overridden[32];  // bit i set if OSC 4 changed index i
+  ghostty_snapshot_dynamic_color_s foreground;
+  ghostty_snapshot_dynamic_color_s background;
+  ghostty_snapshot_dynamic_color_s cursor;
+} ghostty_snapshot_colors_s;
+
+typedef struct {
+  // Cumulative PTY bytes fully parsed when the snapshot was taken, in the
+  // same offset space as ghostty_surface_output_cb.
+  uint64_t parsed_offset;
+  // True if the parser holds no partial escape sequence or UTF-8 sequence.
+  bool parser_ground;
+  bool alt_screen_active;
+  // 47, 1047 or 1049 while the alternate screen is active, else 0.
+  uint16_t alt_screen_mode;
+  uint32_t cols;
+  uint32_t rows;
+  ghostty_snapshot_screen_s primary;
+  ghostty_snapshot_screen_s alternate;
+  // Up to max_scrollback_rows primary history rows directly above the
+  // primary active area, oldest first. Excludes the visible screen.
+  ghostty_snapshot_grid_s scrollback;
+  ghostty_snapshot_modes_s modes;
+  ghostty_snapshot_scroll_region_s scroll_region;
+  ghostty_snapshot_colors_s colors;
+  const char* title;  // NUL-terminated, NULL if no title was set
+  uintptr_t title_len;
+  const char* text;  // UTF-8 storage referenced by cell text offsets
+  uintptr_t text_len;
+  void* _internal;
+} ghostty_surface_snapshot_s;
+
+typedef void (*ghostty_surface_output_cb)(void* userdata,
+                                          uint64_t offset,
+                                          const uint8_t* bytes,
+                                          uintptr_t len);
+typedef void (*ghostty_surface_resize_cb)(void* userdata,
+                                          uint64_t offset,
+                                          uint32_t cols,
+                                          uint32_t rows);
+
+typedef struct {
+  void* userdata;
+  ghostty_surface_output_cb output;
+  ghostty_surface_resize_cb resize;
+} ghostty_surface_stream_callbacks_s;
+
 typedef enum {
   GHOSTTY_POINT_ACTIVE,
   GHOSTTY_POINT_VIEWPORT,
@@ -1158,9 +1372,22 @@ GHOSTTY_API void ghostty_surface_set_occlusion(ghostty_surface_t, bool);
 typedef void (*ghostty_surface_data_cb)(void* userdata,
                                            const uint8_t* bytes,
                                            uintptr_t len);
+// Legacy tee of raw PTY bytes, invoked on the termio read thread before
+// the bytes are parsed and outside the terminal lock. Carries no offset.
 GHOSTTY_API void ghostty_surface_set_data_callback(ghostty_surface_t,
                                                       ghostty_surface_data_cb,
                                                       void* userdata);
+// Install (or clear with NULL) offset-aware stream callbacks. `output`
+// receives each PTY chunk with the cumulative offset of its first byte,
+// immediately before it is parsed. `resize` receives the offset at which
+// a grid resize took effect and the new size. Both are invoked on termio
+// threads while the terminal lock is held, so they are totally ordered
+// with each other and with ghostty_surface_read_snapshot. When this
+// returns, previously installed callbacks are neither running nor called
+// again. Callbacks must not call into libghostty.
+GHOSTTY_API void ghostty_surface_set_stream_callbacks(
+    ghostty_surface_t,
+    const ghostty_surface_stream_callbacks_s*);
 GHOSTTY_API void ghostty_surface_set_size(ghostty_surface_t, uint32_t, uint32_t);
 GHOSTTY_API ghostty_surface_size_s ghostty_surface_size(ghostty_surface_t);
 GHOSTTY_API uint64_t ghostty_surface_foreground_pid(ghostty_surface_t);
@@ -1210,8 +1437,21 @@ GHOSTTY_API bool ghostty_surface_read_text(ghostty_surface_t,
                                               ghostty_selection_s,
                                               ghostty_text_s*);
 GHOSTTY_API void ghostty_surface_free_text(ghostty_surface_t, ghostty_text_s*);
+// Reads the scrolled viewport (what the user sees, including scrollback
+// while scrolled up), not necessarily the live screen. Colors are
+// resolved to RGB and each cell holds only its first codepoint. Free with
+// ghostty_surface_free_cells.
 GHOSTTY_API bool ghostty_surface_read_cells(ghostty_surface_t, ghostty_cells_s*);
 GHOSTTY_API void ghostty_surface_free_cells(ghostty_surface_t, ghostty_cells_s*);
+// Reads the live terminal state (never the scrolled viewport) plus the
+// parse checkpoint, atomically under the terminal lock. Includes at most
+// max_scrollback_rows history rows. Returns false on allocation failure,
+// leaving the snapshot zeroed. Free with ghostty_surface_free_snapshot.
+GHOSTTY_API bool ghostty_surface_read_snapshot(ghostty_surface_t,
+                                                  uint32_t max_scrollback_rows,
+                                                  ghostty_surface_snapshot_s*);
+GHOSTTY_API void ghostty_surface_free_snapshot(ghostty_surface_t,
+                                                  ghostty_surface_snapshot_s*);
 
 #ifdef __APPLE__
 GHOSTTY_API void ghostty_surface_set_display_id(ghostty_surface_t, uint32_t);

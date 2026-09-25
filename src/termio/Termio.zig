@@ -63,6 +63,10 @@ mailbox: termio.Mailbox,
 /// from the child process and calls callbacks in the stream handler.
 terminal_stream: StreamHandler.Stream,
 
+/// Embedder tap and byte offset accounting for the PTY stream. Guarded
+/// by the renderer state mutex.
+stream_tap: termio.StreamTap = .{},
+
 /// Last time the cursor was reset. This is used to prevent message
 /// flooding with cursor resets.
 last_cursor_reset: ?std.time.Instant = null,
@@ -476,12 +480,19 @@ pub fn resize(
         self.renderer_state.mutex.lock();
         defer self.renderer_state.mutex.unlock();
 
+        const old_cols = self.terminal.cols;
+        const old_rows = self.terminal.rows;
+
         // Update the size of our terminal state
         try self.terminal.resize(
             self.alloc,
             grid_size.columns,
             grid_size.rows,
         );
+
+        if (self.terminal.cols != old_cols or self.terminal.rows != old_rows) {
+            self.stream_tap.resized(self.terminal.cols, self.terminal.rows);
+        }
 
         // Update our pixel sizes
         self.terminal.width_px = grid_size.columns * self.size.cell.width;
@@ -652,6 +663,7 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
     // the lock to grab our read data.
     self.renderer_state.mutex.lock();
     defer self.renderer_state.mutex.unlock();
+    self.stream_tap.output(buf);
     self.processOutputLocked(buf);
 }
 

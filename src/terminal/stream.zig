@@ -495,6 +495,12 @@ pub fn Stream(comptime H: type) type {
             self.handler.deinit();
         }
 
+        /// True if no escape sequence or UTF-8 code sequence is partially
+        /// consumed, so the next byte starts fresh parser state.
+        pub fn isGround(self: *const Self) bool {
+            return self.parser.state == .ground and self.utf8decoder.state == 0;
+        }
+
         /// Process a string of characters.
         pub inline fn nextSlice(self: *Self, input: []const u8) void {
             // Disable SIMD optimizations if build requests it or if our
@@ -2760,6 +2766,41 @@ test "simd: complete incomplete utf-8" {
     try testing.expect(s.handler.c == null);
     s.nextSlice(&.{0x80});
     try testing.expectEqual(@as(u21, 0x800), s.handler.c.?);
+}
+
+test "stream: isGround across split sequences" {
+    const H = struct {
+        pub fn vt(
+            _: *@This(),
+            comptime action: Action.Tag,
+            _: Action.Value(action),
+        ) void {}
+    };
+
+    var s: Stream(H) = .init(.{});
+    try testing.expect(s.isGround());
+    s.nextSlice("ab");
+    try testing.expect(s.isGround());
+    s.nextSlice("\x1b");
+    try testing.expect(!s.isGround());
+    s.nextSlice("[3");
+    try testing.expect(!s.isGround());
+    s.nextSlice("1m");
+    try testing.expect(s.isGround());
+    s.nextSlice(&.{ 'x', 0xE2 });
+    try testing.expect(!s.isGround());
+    s.nextSlice(&.{0x94});
+    try testing.expect(!s.isGround());
+    s.nextSlice(&.{0x80});
+    try testing.expect(s.isGround());
+    s.nextSlice("\x1b]0;title");
+    try testing.expect(!s.isGround());
+    s.nextSlice("\x07");
+    try testing.expect(s.isGround());
+    s.next(0x1b);
+    try testing.expect(!s.isGround());
+    s.next('7');
+    try testing.expect(s.isGround());
 }
 
 test "stream: cursor right (CUF)" {
