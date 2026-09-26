@@ -325,7 +325,7 @@ const Builder = struct {
         var pin = start;
         for (0..rows) |y| {
             if (y > 0) pin = pin.down(1).?;
-            const page = &pin.node.data;
+            const page = pin.node.page();
             const rac = pin.rowAndCell();
             row_info[y] = .{
                 .wrap = rac.row.wrap,
