@@ -47,6 +47,7 @@ jobs:
           fi
 
           gh release create "$TAG" \
+            --target "$(git rev-parse HEAD)" \
             --title "GhosttyKit $(date -u +%Y-%m-%d)" \
             --latest \
             --notes "Built from commit ${COMMIT} on $(date -u +%Y-%m-%d)" \
