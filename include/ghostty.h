@@ -578,6 +578,33 @@ typedef struct {
   ghostty_snapshot_charsets_s charsets;
 } ghostty_snapshot_saved_cursor_s;
 
+typedef enum {
+  GHOSTTY_SNAPSHOT_IMAGE_RGB = 0,
+  GHOSTTY_SNAPSHOT_IMAGE_RGBA = 1,
+  GHOSTTY_SNAPSHOT_IMAGE_GRAY = 2,
+  GHOSTTY_SNAPSHOT_IMAGE_GRAY_ALPHA = 3,
+} ghostty_snapshot_image_format_e;
+
+// A stored Kitty graphics image as decoded pixels, rows top to bottom,
+// width * height * bytes-per-pixel bytes at data.
+typedef struct {
+  uint32_t id;
+  uint32_t width;
+  uint32_t height;
+  uint8_t format;  // ghostty_snapshot_image_format_e
+  uint8_t _reserved[3];
+  const uint8_t* data;
+  uintptr_t data_len;
+} ghostty_snapshot_image_s;
+
+// A Kitty virtual placement (U=1) used by Unicode placeholders.
+typedef struct {
+  uint32_t image_id;
+  uint32_t placement_id;  // 0 if the client did not assign one
+  uint32_t columns;  // 0 if not specified
+  uint32_t rows;  // 0 if not specified
+} ghostty_snapshot_placement_s;
+
 typedef struct {
   bool present;  // false if this screen was never created
   uint8_t kitty_keyboard_flags;  // current kitty keyboard flags (CSI = u)
@@ -586,6 +613,12 @@ typedef struct {
   ghostty_snapshot_cursor_s cursor;
   ghostty_snapshot_saved_cursor_s saved_cursor;
   ghostty_snapshot_charsets_s charsets;
+  // Kitty images stored for this screen, oldest transmission first.
+  const ghostty_snapshot_image_s* images;
+  uintptr_t images_len;
+  // Virtual placements for this screen's images; other placements omitted.
+  const ghostty_snapshot_placement_s* virtual_placements;
+  uintptr_t virtual_placements_len;
 } ghostty_snapshot_screen_s;
 
 typedef struct {

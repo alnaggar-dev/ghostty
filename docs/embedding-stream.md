@@ -73,6 +73,12 @@ is taken atomically under the terminal lock and contains:
   never created). Each has a styled grid of its active area, cursor (position,
   SGR pen, pending-wrap, DECSCUSR shape, protection), saved cursor (DECSC /
   1049), charsets (G0..G3, GL, GR, single shift) and kitty keyboard flags.
+  Each screen also carries its Kitty graphics images (`images`, ordered
+  oldest transmission first: id, pixel size, format RGB/RGBA/gray/gray+alpha
+  and a copy of the decoded pixels; PNG and zlib payloads are already
+  decoded) and its virtual placements (`virtual_placements`, `U=1`: image
+  id, placement id or 0, columns and rows, 0 when unspecified). Placements
+  pinned to cells are not exported.
 - `alt_screen_active` and `alt_screen_mode` (47, 1047 or 1049).
 - `scrollback`: at most `max_scrollback_rows` history rows directly above the
   primary active area, oldest first; the visible screen is not included.

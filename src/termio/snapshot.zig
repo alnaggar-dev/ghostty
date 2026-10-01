@@ -9,6 +9,7 @@
 //! The extern structs in this file are the C ABI declared in
 //! `include/ghostty.h` and must be kept in sync with it.
 const std = @import("std");
+const build_options = @import("terminal_options");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const testing = std.testing;
@@ -119,6 +120,33 @@ pub const SavedCursor = extern struct {
     charsets: Charsets = .{},
 };
 
+// ghostty_snapshot_image_format_e
+pub const ImageFormat = enum(u8) {
+    rgb = 0,
+    rgba = 1,
+    gray = 2,
+    gray_alpha = 3,
+};
+
+// ghostty_snapshot_image_s
+pub const ImageOut = extern struct {
+    id: u32 = 0,
+    width: u32 = 0,
+    height: u32 = 0,
+    format: u8 = @intFromEnum(ImageFormat.rgba),
+    _reserved: [3]u8 = .{ 0, 0, 0 },
+    data: ?[*]const u8 = null,
+    data_len: usize = 0,
+};
+
+// ghostty_snapshot_placement_s
+pub const PlacementOut = extern struct {
+    image_id: u32 = 0,
+    placement_id: u32 = 0,
+    columns: u32 = 0,
+    rows: u32 = 0,
+};
+
 // ghostty_snapshot_screen_s
 pub const ScreenOut = extern struct {
     present: bool = false,
@@ -128,6 +156,10 @@ pub const ScreenOut = extern struct {
     cursor: Cursor = .{},
     saved_cursor: SavedCursor = .{},
     charsets: Charsets = .{},
+    images: ?[*]const ImageOut = null,
+    images_len: usize = 0,
+    virtual_placements: ?[*]const PlacementOut = null,
+    virtual_placements_len: usize = 0,
 };
 
 // ghostty_snapshot_modes_s
@@ -282,7 +314,7 @@ const Builder = struct {
 
     fn screen(self: *Builder, s: *const Screen) Allocator.Error!ScreenOut {
         const pages = &s.pages;
-        return .{
+        var out: ScreenOut = .{
             .present = true,
             .kitty_keyboard_flags = s.kitty_keyboard.current().int(),
             .grid = try self.grid(pages.getTopLeft(.active), pages.cols, pages.rows),
@@ -306,6 +338,70 @@ const Builder = struct {
             } else .{},
             .charsets = charsets(s.charset),
         };
+        if (comptime build_options.kitty_graphics) try self.kittyImages(s, &out);
+        return out;
+    }
+
+    fn kittyImages(self: *Builder, s: *const Screen, out: *ScreenOut) Allocator.Error!void {
+        const storage = &s.kitty_images;
+
+        const sources = try self.alloc.alloc(terminal.kitty.graphics.Image, storage.images.count());
+        var it = storage.images.valueIterator();
+        var i: usize = 0;
+        while (it.next()) |img| : (i += 1) sources[i] = img.*;
+        std.mem.sortUnstable(terminal.kitty.graphics.Image, sources, {}, struct {
+            fn lessThan(_: void, a: terminal.kitty.graphics.Image, b: terminal.kitty.graphics.Image) bool {
+                return a.generation < b.generation;
+            }
+        }.lessThan);
+
+        const images = try self.alloc.alloc(ImageOut, sources.len);
+        var images_len: usize = 0;
+        for (sources) |img| {
+            const format: ImageFormat = switch (img.format) {
+                .rgb => .rgb,
+                .rgba => .rgba,
+                .gray => .gray,
+                .gray_alpha => .gray_alpha,
+                .png => continue,
+            };
+            const data = try self.alloc.dupe(u8, img.data);
+            images[images_len] = .{
+                .id = img.id,
+                .width = img.width,
+                .height = img.height,
+                .format = @intFromEnum(format),
+                .data = data.ptr,
+                .data_len = data.len,
+            };
+            images_len += 1;
+        }
+        if (images_len > 0) {
+            out.images = images.ptr;
+            out.images_len = images_len;
+        }
+
+        const placements = try self.alloc.alloc(PlacementOut, storage.placements.count());
+        var placements_len: usize = 0;
+        var pit = storage.placements.iterator();
+        while (pit.next()) |entry| {
+            if (entry.value_ptr.location != .virtual) continue;
+            const key = entry.key_ptr.*;
+            placements[placements_len] = .{
+                .image_id = key.image_id,
+                .placement_id = switch (key.placement_id.tag) {
+                    .external => key.placement_id.id,
+                    .internal => 0,
+                },
+                .columns = entry.value_ptr.columns,
+                .rows = entry.value_ptr.rows,
+            };
+            placements_len += 1;
+        }
+        if (placements_len > 0) {
+            out.virtual_placements = placements.ptr;
+            out.virtual_placements_len = placements_len;
+        }
     }
 
     fn scrollback(self: *Builder, s: *const Screen, max: u32) Allocator.Error!Grid {
@@ -777,6 +873,52 @@ test "snapshot captures modes, scroll region, palette and title" {
     try testing.expectEqual(@as(u8, 0), s.title.?[s.title_len]);
 }
 
+test "snapshot exports kitty images and virtual placements per screen" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+    const tt = try TestTerm.init(10, 4);
+    defer tt.deinit();
+    tt.feed("\x1b_Ga=t,f=24,s=2,v=1,i=7,q=2;AQIDBAUG\x1b\\");
+    tt.feed("\x1b_Ga=p,U=1,i=7,p=3,c=4,r=2,q=2\x1b\\");
+    tt.feed("\x1b_Ga=t,f=32,s=1,v=1,i=9,q=2;CgsMDQ==\x1b\\");
+    tt.feed("\x1b_Ga=p,i=9,q=2\x1b\\");
+    tt.feed("\x1b[?1049h");
+    tt.feed("\x1b_Ga=t,f=32,s=1,v=1,i=11,q=2;AAAAAA==\x1b\\");
+    tt.feed("\x1b_Ga=p,U=1,i=11,c=1,r=1,q=2\x1b\\");
+
+    var s = try tt.snapshot(0);
+    defer free(testing.allocator, &s);
+
+    const p = s.primary;
+    try testing.expectEqual(@as(usize, 2), p.images_len);
+    const first = p.images.?[0];
+    try testing.expectEqual(@as(u32, 7), first.id);
+    try testing.expectEqual(@as(u32, 2), first.width);
+    try testing.expectEqual(@as(u32, 1), first.height);
+    try testing.expectEqual(@intFromEnum(ImageFormat.rgb), first.format);
+    try testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6 }, first.data.?[0..first.data_len]);
+    const second = p.images.?[1];
+    try testing.expectEqual(@as(u32, 9), second.id);
+    try testing.expectEqual(@intFromEnum(ImageFormat.rgba), second.format);
+    try testing.expectEqualSlices(u8, &.{ 10, 11, 12, 13 }, second.data.?[0..second.data_len]);
+
+    try testing.expectEqual(@as(usize, 1), p.virtual_placements_len);
+    try testing.expectEqual(PlacementOut{ .image_id = 7, .placement_id = 3, .columns = 4, .rows = 2 }, p.virtual_placements.?[0]);
+
+    const a = s.alternate;
+    try testing.expectEqual(@as(usize, 1), a.images_len);
+    try testing.expectEqual(@as(u32, 11), a.images.?[0].id);
+    try testing.expectEqual(@as(usize, 1), a.virtual_placements_len);
+    try testing.expectEqual(PlacementOut{ .image_id = 11, .placement_id = 0, .columns = 1, .rows = 1 }, a.virtual_placements.?[0]);
+
+    tt.feed("\x1b_Ga=d,d=I,i=11,q=2\x1b\\");
+    var cleared = try tt.snapshot(0);
+    defer free(testing.allocator, &cleared);
+    try testing.expectEqual(@as(usize, 0), cleared.alternate.images_len);
+    try testing.expect(cleared.alternate.images == null);
+    try testing.expect(cleared.alternate.virtual_placements == null);
+    try testing.expectEqual(@as(usize, 2), cleared.primary.images_len);
+}
+
 test "snapshot free releases memory once and zeroes the snapshot" {
     const tt = try TestTerm.init(4, 2);
     defer tt.deinit();
@@ -792,7 +934,9 @@ test "snapshot free releases memory once and zeroes the snapshot" {
 test "snapshot read failure at any allocation zeroes the output and leaks nothing" {
     const tt = try TestTerm.init(6, 3);
     defer tt.deinit();
-    tt.feed("l0\r\nl1\r\nl2\r\n\x1b]2;t\x07e\u{301}\x1b[?1049hx");
+    tt.feed("l0\r\nl1\r\nl2\r\n\x1b]2;t\x07e\u{301}");
+    tt.feed("\x1b_Ga=t,f=24,s=1,v=1,i=5,q=2;AQID\x1b\\\x1b_Ga=p,U=1,i=5,c=1,r=1,q=2\x1b\\");
+    tt.feed("\x1b[?1049hx");
 
     const opts: Options = .{
         .max_scrollback_rows = 10,
